@@ -26,6 +26,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from torch.optim.lr_scheduler import OneCycleLR
 
+
 class YOLOv3Lightning(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
@@ -37,11 +38,12 @@ class YOLOv3Lightning(pl.LightningModule):
             * torch.tensor(config.S).unsqueeze(1).unsqueeze(1).repeat(1, 3, 2)
         ).to(config.DEVICE)
         self.train_step_outputs = []
+        self.validation_step_outputs = []
 
     def forward(self, x):
         return self.model(x)
 
-    def training_step(self, batch, batch_idx):
+    def get_loss(self, batch):
         x, y = batch
         y0, y1, y2 = (
             y[0],
@@ -54,7 +56,11 @@ class YOLOv3Lightning(pl.LightningModule):
                 + self.loss_fn(out[1], y1, self.scaled_anchors[1])
                 + self.loss_fn(out[2], y2, self.scaled_anchors[2])
         )
-        self.log("train_loss", loss, on_epoch=True, prog_bar=True, logger=True)  # Logging the training loss for visualization
+        return loss
+    
+    def training_step(self, batch, batch_idx):
+        loss = self.get_loss(batch)
+        self.log("train/loss", loss, on_epoch=True, prog_bar=True, logger=True)  # Logging the training loss for visualization
         self.train_step_outputs.append(loss)
         return loss
 
@@ -63,18 +69,30 @@ class YOLOv3Lightning(pl.LightningModule):
         train_epoch_average = torch.stack(self.train_step_outputs).mean()
         self.train_step_outputs.clear()
         print(f"Train loss {train_epoch_average}")
-        print("On Train Eval loader:")
         print("On Train loader:")
         class_accuracy, no_obj_accuracy, obj_accuracy = check_class_accuracy(self.model, self.train_loader, threshold=config.CONF_THRESHOLD)
-        self.log("class_accuracy", class_accuracy, on_epoch=True, prog_bar=True, logger=True)
-        self.log("no_obj_accuracy", no_obj_accuracy, on_epoch=True, prog_bar=True, logger=True)
-        self.log("obj_accuracy", obj_accuracy, on_epoch=True, prog_bar=True, logger=True)
+        self.log("train/class_accuracy", class_accuracy, on_epoch=True, prog_bar=True, logger=True)
+        self.log("train/no_obj_accuracy", no_obj_accuracy, on_epoch=True, prog_bar=True, logger=True)
+        self.log("train/obj_accuracy", obj_accuracy, on_epoch=True, prog_bar=True, logger=True)
+        
+        val_epoch_average = torch.stack(self.validation_step_outputs).mean()
+        self.validation_step_outputs.clear()
+        print(f"Validation loss {val_epoch_average}")
+        print("On Train Eval loader:")
+        class_accuracy, no_obj_accuracy, obj_accuracy = check_class_accuracy(self.model, self.train_eval_loader, threshold=config.CONF_THRESHOLD)
+        self.log("val/class_accuracy", class_accuracy, on_epoch=True, prog_bar=True, logger=True)
+        self.log("val/no_obj_accuracy", no_obj_accuracy, on_epoch=True, prog_bar=True, logger=True)
+        self.log("val/obj_accuracy", obj_accuracy, on_epoch=True, prog_bar=True, logger=True)
 
         if (self.current_epoch>0) and ((self.current_epoch+1) % 10 == 0):
             plot_couple_examples(self.model, self.test_loader, 0.6, 0.5, self.scaled_anchors)
 
         if (self.current_epoch>0) and (self.current_epoch+1 == 40):
-            check_class_accuracy(self.model, self.test_loader, threshold=config.CONF_THRESHOLD)
+            print("On Test loader:")
+            test_class_accuracy, test_no_obj_accuracy, test_obj_accuracy = check_class_accuracy(self.model, self.test_loader, threshold=config.CONF_THRESHOLD)
+            self.log("test/class_accuracy", test_class_accuracy, on_epoch=True, prog_bar=True, logger=True)
+            self.log("test/no_obj_accuracy", test_no_obj_accuracy, on_epoch=True, prog_bar=True, logger=True)
+            self.log("test/obj_accuracy", test_obj_accuracy, on_epoch=True, prog_bar=True, logger=True)
             pred_boxes, true_boxes = get_evaluation_bboxes(
                 self.test_loader,
                 self.model,
@@ -93,20 +111,25 @@ class YOLOv3Lightning(pl.LightningModule):
 
             self.log("MAP", mapval.item(), on_epoch=True, prog_bar=True, logger=True)
 
+    def validation_step(self, batch, batch_idx):
+        loss = self.get_loss(batch)
+        self.log("val/loss", loss, on_epoch=True, prog_bar=True, logger=True)
+        self.validation_step_outputs.append(loss)
+        return loss
+    
     def configure_optimizers(self):
         optimizer = optim.Adam(
             self.parameters(),
             lr=self.config.LEARNING_RATE,
             weight_decay=self.config.WEIGHT_DECAY,
         )
-
         self.trainer.fit_loop.setup_data()
         dataloader = self.trainer.train_dataloader
 
         EPOCHS = config.NUM_EPOCHS
         lr_scheduler = OneCycleLR(
             optimizer,
-            max_lr=1E-3,
+            max_lr=1.0E-03,
             steps_per_epoch=len(dataloader),
             epochs=EPOCHS,
             pct_start=5/EPOCHS,
@@ -137,20 +160,21 @@ class YOLOv3Lightning(pl.LightningModule):
 
 
 if __name__ == "__main__":
-
+    
     model = YOLOv3Lightning(config)
 
-    checkpoint = ModelCheckpoint(filename='last_epoch', save_last=True)
+    checkpoint = ModelCheckpoint(save_last=True)
     lr_rate_monitor = LearningRateMonitor(logging_interval="epoch")
     trainer = pl.Trainer(
                   max_epochs=config.NUM_EPOCHS,
-                  deterministic=True,
+                  deterministic=False,
                   logger=True,
-                  callbacks=[lr_rate_monitor],
+                  callbacks=[checkpoint, lr_rate_monitor],
                   enable_model_summary=False,
                   log_every_n_steps=1,
                   precision=16
               )
     print("Training Started by Selvaraj Sembulingam")
     trainer.fit(model)
+    print("Training Completed by Selvaraj Sembulingam")
     torch.save(model.state_dict(), 'YOLOv3.pth')
