@@ -89,4 +89,6 @@ Mosaic augmentation teaches the model to recognize objects in different localiza
 ### Link to Gradio Interface
 https://huggingface.co/spaces/selvaraj-sembulingam/object-detection-with-yolov3
 
+Collaborated with selvaraj-sembulingam on this.
+
 
